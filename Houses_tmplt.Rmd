@@ -144,6 +144,7 @@ glbObsNewFile <- #list(url = "<obsNewFileName>") # default OR
     #                      )
     #    )                   
     list(splitSpecs = list(method = "sample", nRatio = 0.2, seed = 0))
+
 glbInpMerge <- NULL #: default
 #     list(fnames = c("<fname1>", "<fname2>")) # files will be concatenated
 
@@ -329,6 +330,7 @@ glbFeatsDerive[["id.date"]] <- list(
 #     , args = c("<arg1>"))
     
     # multiple args    
+#     mapfn = function(id, date) { return(paste(as.character(id), as.character(date), sep = "#")) }        
 #     mapfn = function(PTS, oppPTS) { return(PTS - oppPTS) }
 #     mapfn = function(startprice.log10.predict, startprice) {
 #                  return(spdiff <- (10 ^ startprice.log10.predict) - startprice) } 
