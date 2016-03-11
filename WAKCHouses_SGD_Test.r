@@ -101,26 +101,47 @@ ridgeRegressionLossGradientFn <- function(obsDf, feats, weights, l2Penalty,
 
 autoLossGradientFn <- function(obsDf, feats, weights, l2Penalty,
                                     featIx, isIntercept, verbose = FALSE) {
+    if (any(is.nan(weights))) {
+        print("autoLossGradientFn: weights:")
+        print(weights)
+        stop("one or more weights are NaNs")
+    }
 
     if (weights[featIx] != 0)
-        weightSearchSpace <- c(weights[featIx], 0,
-            seq(0.01 * weights[featIx], 100 * weights[featIx], length.out = 20)) else
-        weightSearchSpace <- c(weights[featIx],
-            seq(-0.1, +0.1, length.out = 20))
-
+        weightSearchSpace <- c(weights[featIx], 0.99 * weights[featIx], 1.01 * weights[featIx]) else
+        weightSearchSpace <- c(weights[featIx], -0.01                 , +0.01                 )
     lossDf <- data.frame(weight = weightSearchSpace)
-    lossDf[, 'loss'] <- sapply(1:nrow(lossDf), function(weightIx)
-        ridgeRegressionLossFn(obsDf, feats,
-                              c(head(weights, featIx - 1),
-                                lossDf[weightIx, 'weight'],
-                                tail(weights, -featIx)),
-                              l2Penalty))
-    lossDf <- dplyr::arrange(lossDf, weight)
+
+    cmptLoss <- function(resDf) {
+        if (!('loss' %in% names(resDf)))
+            lossDf[, 'loss'] <- NA
+
+        lossDf[is.na(lossDf$loss), 'loss'] <-
+            sapply(lossDf[is.na(lossDf$loss), 'weight'], function(thsWeight)
+                                            ridgeRegressionLossFn(obsDf, feats,
+                                                                  c(head(weights, featIx - 1),
+                                                                    thsWeight,
+                                                                    tail(weights, -featIx)),
+                                                                  l2Penalty))
+        lossDf <- dplyr::arrange(lossDf, weight)
+        return(lossDf)
+    }
+
+    lossDf <- cmptLoss(lossDf)
     thsWeightIx <- which(lossDf$weight == weights[featIx])
     gradientAuto <- (lossDf[thsWeightIx + 1, 'loss']   - lossDf[thsWeightIx - 1, 'loss'  ]) /
                     (lossDf[thsWeightIx + 1, 'weight'] - lossDf[thsWeightIx - 1, 'weight'])
 
     if (verbose) {
+        if (weights[featIx] != 0)
+            weightSearchSpace <- c(weights[featIx], 0,
+                        seq(0.01 * weights[featIx], 100 * weights[featIx], length.out = 20)) else
+            weightSearchSpace <- c(weights[featIx],
+                        seq(-0.1, +0.1, length.out = 20))
+        weightSearchSpace <- setdiff(weightSearchSpace, lossDf$weight)
+        lossDf <- myrbind_df(lossDf, data.frame(weight = weightSearchSpace))
+        lossDf <- cmptLoss(lossDf)
+
         gradientActual <- ridgeRegressionLossGradientFn(obsDf, feats, weights,
                                                         l2Penalty, featIx, isIntercept)
         print(sprintf('autoLossGradientFn: weights[%d]: %.4e; isIntercept: %s;',
@@ -214,6 +235,12 @@ optimizeGradientDescent <- function(obsDf, feats, weightsInitial,
             #   current weight
             weights[i] = weights[i] - stepSize * gradient
         }
+        if (any(is.nan(weights))) {
+            warning(sprintf(
+                "optimizeGradientDescent: weights: one or more elements are NaNs; iterNum: %d",
+                            iterNum))
+            break
+        }
 
         loss <- lossFn(obsDf, feats, weights, l2Penalty)
         iterResults[iterNum, "loss"] <- loss
@@ -286,6 +313,8 @@ optimizeGradientDescent <- function(obsDf, feats, weightsInitial,
 }
 
 stepSize <- 1e-10; l2Penalty <- 1e+10; maxIterations = 100
+
+startTm <- proc.time()["elapsed"]
 weightsTst <-
     optimizeGradientDescent(obsDf = glbObsFit, feats = glbFeats,
                             weightsInitial = weightsZero,
@@ -296,8 +325,12 @@ weightsTst <-
                             maxIterations = maxIterations,
                             verbose = TRUE,
                             maxLoss = 1e156)
+print(sprintf("optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+              proc.time()["elapsed"] - startTm))
 print(sprintf('weightsTst:'))
 print(weightsTst)
+
+startTm <- proc.time()["elapsed"]
 weightsTst <-
     optimizeGradientDescent(obsDf = glbObsFit, feats = glbFeats,
                             weightsInitial = weightsZero,
@@ -306,8 +339,10 @@ weightsTst <-
                             lossFn = ridgeRegressionLossFn,
                             lossGradientFn = autoLossGradientFn,
                             maxIterations = maxIterations,
-                            verbose = FALSE,
+                            verbose = TRUE,
                             maxLoss = 1e156)
+print(sprintf("optimizeGradientDescent(autoLossGradientFn): elapsed secs: %.0f",
+              proc.time()["elapsed"] - startTm))
 print(sprintf('weightsTst:'))
 print(weightsTst)
 
@@ -320,6 +355,14 @@ weightsTest <-
                            maxLoss = 1e155)
 print(sprintf('weightsTest:'))
 print(weightsTest)
+weightsTest <-
+    optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                            stepSize, l2Penalty,
+                            ridgeRegressionLossFn, autoLossGradientFn,
+                            maxIterations, verbose = TRUE,
+                            maxLoss = 1e155)
+print(sprintf('weightsTest:'))
+print(weightsTest)
 
 stepSize <- 1e-12; l2Penalty <- 0.0; maxIterations = 100
 weightsL2Zero <-
@@ -329,12 +372,26 @@ weightsL2Zero <-
                             maxIterations, verbose = TRUE)
 print(sprintf('weightsL2Zero:'))
 print(weightsL2Zero)
+weightsL2Zero <-
+    optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                            stepSize, l2Penalty,
+                            ridgeRegressionLossFn, autoLossGradientFn,
+                            maxIterations, verbose = TRUE)
+print(sprintf('weightsL2Zero:'))
+print(weightsL2Zero)
 
 stepSize <- 1e-12; l2Penalty <- 1e10; maxIterations = 100
 weightsL2Hgh <-
     optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
                             stepSize, l2Penalty,
                     ridgeRegressionLossFn, ridgeRegressionLossGradientFn,
+                            maxIterations, verbose = TRUE)
+print(sprintf('weightsL2Hgh:'))
+print(weightsL2Hgh)
+weightsL2Hgh <-
+    optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                            stepSize, l2Penalty,
+                            ridgeRegressionLossFn, autoLossGradientFn,
                             maxIterations, verbose = TRUE)
 print(sprintf('weightsL2Hgh:'))
 print(weightsL2Hgh)
