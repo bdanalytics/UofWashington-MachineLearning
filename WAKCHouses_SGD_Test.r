@@ -171,7 +171,7 @@ example_weights = c(1.0, 10.0)
 example_predictions = predictOutput(glbObsTrn, 'sqft_living', example_weights)
 example_errors = example_predictions - glbObsTrn[, glb_rsp_var]
 
-# next two lines should print the same values; third is approx
+# next three lines should print the same values
 print(sum(example_errors * glbObsTrn[, 'sqft_living'])*2+20)
 # print(example_errors[1:5])
 # print(glbObsTrn[1:5, 'sqft_living'])
@@ -220,7 +220,7 @@ optimizeGradientDescent <- function(obsDf, feats, weightsInitial,
     for (iterNum in 1:maxIterations) {
         if (verbose &&
             ((iterNum %% (maxIterations / 10) == 1) ||
-             (iterNum <=10)))
+             (iterNum <= 10)))
             print(sprintf("  iteration: %d; loss:%0.4e", iterNum, loss))
 
         # loop over each weight
@@ -325,7 +325,8 @@ weightsTst <-
                             maxIterations = maxIterations,
                             verbose = TRUE,
                             maxLoss = 1e156)
-print(sprintf("optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
               proc.time()["elapsed"] - startTm))
 print(sprintf('weightsTst:'))
 print(weightsTst)
@@ -347,52 +348,82 @@ print(sprintf('weightsTst:'))
 print(weightsTst)
 
 stepSize <- 2e-11; l2Penalty <- 1e+10; maxIterations = 100
-weightsTest <-
+
+startTm <- proc.time()["elapsed"]
+weightsTst <-
     optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
                             stepSize, l2Penalty,
                     ridgeRegressionLossFn, ridgeRegressionLossGradientFn,
                             maxIterations, verbose = TRUE,
                            maxLoss = 1e155)
-print(sprintf('weightsTest:'))
-print(weightsTest)
-weightsTest <-
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
+print(sprintf('weightsTst:'))
+print(weightsTst)
+
+startTm <- proc.time()["elapsed"]
+weightsTst <-
     optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
                             stepSize, l2Penalty,
                             ridgeRegressionLossFn, autoLossGradientFn,
                             maxIterations, verbose = TRUE,
                             maxLoss = 1e155)
-print(sprintf('weightsTest:'))
-print(weightsTest)
+print(sprintf(
+    "optimizeGradientDescent(autoLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
+print(sprintf('weightsTst:'))
+print(weightsTst)
 
 stepSize <- 1e-12; l2Penalty <- 0.0; maxIterations = 100
+
+startTm <- proc.time()["elapsed"]
 weightsL2Zero <-
     optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
                             stepSize, l2Penalty,
                     ridgeRegressionLossFn, ridgeRegressionLossGradientFn,
                             maxIterations, verbose = TRUE)
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
 print(sprintf('weightsL2Zero:'))
 print(weightsL2Zero)
+
+startTm <- proc.time()["elapsed"]
 weightsL2Zero <-
     optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
                             stepSize, l2Penalty,
                             ridgeRegressionLossFn, autoLossGradientFn,
                             maxIterations, verbose = TRUE)
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
 print(sprintf('weightsL2Zero:'))
 print(weightsL2Zero)
 
 stepSize <- 1e-12; l2Penalty <- 1e10; maxIterations = 100
+
+startTm <- proc.time()["elapsed"]
 weightsL2Hgh <-
     optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
                             stepSize, l2Penalty,
                     ridgeRegressionLossFn, ridgeRegressionLossGradientFn,
                             maxIterations, verbose = TRUE)
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
 print(sprintf('weightsL2Hgh:'))
 print(weightsL2Hgh)
+
+startTm <- proc.time()["elapsed"]
 weightsL2Hgh <-
     optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
                             stepSize, l2Penalty,
                             ridgeRegressionLossFn, autoLossGradientFn,
                             maxIterations, verbose = TRUE)
+print(sprintf(
+    "optimizeGradientDescent(autoLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
 print(sprintf('weightsL2Hgh:'))
 print(weightsL2Hgh)
 
@@ -401,7 +432,10 @@ getObsRSS <- function(obsDf, feats, weights) {
                 predictOutput(obsDf, feats, weights)) ^ 2))
 }
 
-mdlLst <- list()
+mdlDfFlnm <- "WAKCHouses_SGD_Test.RData"
+if (file.exists(mdlDfFlnm))
+    load("WAKCHouses_SGD_Test.RData", verbose = TRUE) else
+    mdlDf <- data.frame()
 
 savMdlDf <- mdlDf
 
