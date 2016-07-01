@@ -1,0 +1,816 @@
+---
+title: "AmazonReviews: rating classification:: AmazonReviews_SGD_Test"
+author: "bdanalytics"
+
+output:
+    html_document:
+        keep_md: yes
+        pandoc_args: ["+RTS", "-K64M", "-RTS"]
+
+---
+
+**  **    
+**Date: `r format(Sys.time(), "(%a) %b %d, %Y")`**    
+
+```{r set_global_options_wd, echo=FALSE}
+setwd("~/Documents/Work/Courses/Coursera/uwashington/uwashington-machinelearning/notebooks")
+```
+
+```{r set_global_options}
+rm(list = ls())
+set.seed(12345)
+options(stringsAsFactors = FALSE)
+source("~/Dropbox/datascience/R/myscript.R")
+source("~/Dropbox/datascience/R/mydsutils.R")
+source("~/Dropbox/datascience/R/myplot.R")
+source("~/Dropbox/datascience/R/mypetrinet.R")
+source("~/Dropbox/datascience/R/myplclust.R")
+source("~/Dropbox/datascience/R/mytm.R")
+# Gather all package requirements here
+suppressPackageStartupMessages(require(doMC))
+glbCores <- 6 # of cores on machine - 2
+registerDoMC(glbCores)
+
+glbObsTrnFile <- list(name = "amazon_baby_subset.csv")
+glb_rsp_var_raw <- "sentiment"
+glb_rsp_var <- "sentiment.fctr"
+
+glb_map_rsp_raw_to_var <- function(raw) {
+    ret_vals <- rep_len(NA, length(raw)); 
+    ret_vals[!is.na(raw)] <- ifelse(raw[!is.na(raw)] == +1, "P", "N");          return(relevel(as.factor(ret_vals), ref = "N"))
+}
+
+#print(table(glbObsTrn[, glb_rsp_var_raw], useNA = "ifany"))
+#print(table(glb_map_rsp_raw_to_var(tst <- glbObsTrn[, glb_rsp_var_raw]), useNA = "ifany"))
+print(glb_map_rsp_raw_to_var(tst <- c(NA, +1, -1))) 
+
+glb_map_rsp_var_to_raw <- function(var) {
+    c("N", "P")[as.numeric(var)]
+}
+#print(table(glb_map_rsp_var_to_raw(glb_map_rsp_raw_to_var(tst)), useNA = "ifany"))
+print(glb_map_rsp_var_to_raw(glb_map_rsp_raw_to_var(tst)))
+
+if ((glb_rsp_var != glb_rsp_var_raw) && is.null(glb_map_rsp_raw_to_var))
+    stop("glb_map_rsp_raw_to_var function expected")
+
+glbObsTrnPartitionSeed <- 123
+```
+
+glbMdlDfFlnm <- "AmazonReviews_SGD_Test_r.RData"
+
+## Load and process review dataset
+
+```{r importData}
+glbObsTrn <- myimport_data(specs = glbObsTrnFile, comment = "glbObsTrn",
+                           force_header = TRUE)
+glbObsTrn[, glb_rsp_var] <- 
+    glb_map_rsp_raw_to_var(glbObsTrn[, glb_rsp_var_raw])
+print(table(glbObsTrn[, glb_rsp_var_raw], useNA = "ifany"))
+print(table(glbObsTrn[, glb_rsp_var    ], useNA = "ifany"))
+
+require(jsonlite)
+require(tm)
+
+impWrd <- fromJSON("data/important_words.json")
+impWrdLen <- sapply(impWrd, function(word) nchar(word))
+
+rvwCorpus <- Corpus(VectorSource(glbObsTrn[, 'review']))
+rvwCorpus <- tm_map(rvwCorpus, PlainTextDocument, lazy = TRUE)
+rvwCorpus <- tm_map(rvwCorpus, content_transformer(tolower), lazy = TRUE)
+rvwCorpus <- tm_map(rvwCorpus, content_transformer(removeNumbers), 
+                    lazy = TRUE)
+# removePunctuation does not replace with whitespace. 
+rvwCorpus <- tm_map(rvwCorpus, content_transformer(myreplacePunctuation),
+                    lazy = TRUE)
+
+rvwDTM <- DocumentTermMatrix(rvwCorpus, control = list(
+    weighting = weightTf, 
+    wordLengths = c(min(impWrdLen), max(impWrdLen)),
+    bounds = list(global = c(800, Inf))))
+print(rvwDTM)
+rvwTermsMtrx <- as.matrix(rvwDTM)
+print(setdiff(impWrd, dimnames(rvwTermsMtrx)$Terms))
+
+rvwTxtTerms <- mygetTxtTerms(rvwDTM, glbObsTrn[, glb_rsp_var],
+						  compute.cor.y = TRUE, 
+						  compute.nzv = FALSE, 
+						  compute.chisq = TRUE, 
+						  compute.classWeights = FALSE)
+print(rvwTxtTerms[rvwTxtTerms$term %in% c('unit', 'tub', 'returned'), ])
+#print(intersect(head(dplyr::arrange(rvwTxtTerms, weight))$term, impWrd))
+
+mypltWordCloud(as.matrix(rvwDTM))
+
+print(intersect(rvwTxtTerms[rvwTxtTerms$chisq.pval <= 0.05, 'term'],
+                impWrd))
+require(dplyr)
+impTxtTerms <- rvwTxtTerms %>% 
+          dplyr::filter(chisq.pval <= 0.05) %>%
+          dplyr::top_n(length(impWrd), chisq.stat)
+print("Wrong selection:")
+print(setdiff(impTxtTerms$term, impWrd))
+print("Mtchd selection:")
+print(intersect(impTxtTerms$term, impWrd))
+print("Mssed selection:")
+print(setdiff(impWrd, impTxtTerms$term))
+
+pltDf <- rvwTxtTerms
+pltDf$chisq.pval.fctr <- cut(pltDf$chisq.pval, 
+                             breaks = c(-0.05, 0.00, 0.05, 0.10, 1.00))
+pltDf[pltDf$term %in% impWrd, 'label'] <- 
+pltDf[pltDf$term %in% impWrd, 'term' ]
+print(ggplot(pltDf, aes(x = cor.y, y = chisq.stat)) + 
+          geom_point(aes(color = chisq.pval.fctr, size = weight)) +
+          geom_text(aes(label = label), size = 2, color = "gray50") + 
+          ggtitle("freq > 800"))
+print(subset(pltDf, (chisq.stat > 4000)))
+
+print(ggplot(subset(pltDf, (chisq.pval.fctr == "(-0.05,0]")),
+                    aes(x = cor.y, y = chisq.stat)) + 
+          geom_point(aes(size = weight), color = 'red') +
+          geom_text(aes(label = label), size = 3, color = "gray50") + 
+          ggtitle("(freq > 800) & (chisq.pval.fctr == '(-0.05,0]')"))
+
+print(ggplot(subset(pltDf, (chisq.pval.fctr == "(0,0.05]")),
+                    aes(x = cor.y, y = chisq.stat)) + 
+          geom_point(aes(size = weight), color = 'green') +
+          geom_text(aes(label = label), size = 3, color = "gray50") + 
+          ggtitle("(freq > 800) & (chisq.pval.fctr == '(0,0.05]')"))
+
+print(ggplot(subset(pltDf, (chisq.pval.fctr == "(0.05,0.1]")),
+                    aes(x = cor.y, y = chisq.stat)) + 
+          geom_point(aes(size = weight), color = 'blue') +
+          geom_text(aes(label = label), size = 3, color = "gray50") + 
+          ggtitle("(freq > 800) & (chisq.pval.fctr == '(0.05,0.1]')"))
+
+print(ggplot(subset(pltDf, (chisq.pval.fctr == "(0.1,1]")),
+                    aes(x = cor.y, y = chisq.stat)) + 
+          geom_point(aes(size = weight), color = 'purple') +
+          geom_text(aes(label = label), size = 3, color = "gray50") + 
+          ggtitle("(freq > 800) & (chisq.pval.fctr == '(0.1,1]')"))
+
+rvwImpWrdMtrx <- rvwTermsMtrx[, dimnames(rvwTermsMtrx)$Terms %in% impWrd]
+print(sort(colSums(rvwImpWrdMtrx)))
+
+# print(head(glbObsTrn[which(glbObsTrn$name == 'Baby Trend Diaper Champ'), ]))
+# print(glbObsTrn[50, 'review'])
+# rowIx <- 50; print(rvwTermsMtrx[rowIx, (rvwTermsMtrx[rowIx, ] > 0)])
+
+# rvwTermsDf <- as.data.frame(rvwTermsMtrx)
+# names(rvwTermsDf) <- paste("R", names(rvwTermsDf), sep = ".")
+# tmpObsTrn <- cbind(glbObsTrn, rvwTermsDf)
+# fitRslts <- myfit_mdl(mdl_specs_lst = myinit_mdl_specs_lst(mdl_specs_lst = list(
+#     id.prefix = "Txt.Terms", 
+#     type = "classification",     
+#     train.method = "glmnet")),
+#     indep_vars = names(rvwTermsDf),
+#     rsp_var = glb_rsp_var, 
+#     fit_df = tmpObsTrn, OOB_df = NULL)
+
+rvwImpWrdDf <- as.data.frame(rvwImpWrdMtrx)
+names(rvwImpWrdDf) <- paste("R", names(rvwImpWrdDf), sep = ".")
+glbObsTrn <- cbind(glbObsTrn, rvwImpWrdDf)
+
+set.seed(glbObsTrnPartitionSeed)
+require(caTools)
+split <- sample.split(glbObsTrn[, glb_rsp_var_raw], SplitRatio = 0.1)
+print(sum(split))
+glbObsOOB <- glbObsTrn[ split, ]
+glbObsFit <- glbObsTrn[!split, ]
+print(sprintf("glbObsFit:")); print(dim(glbObsFit))
+print(sprintf("glbObsOOB:")); print(dim(glbObsOOB))
+
+```
+
+```{r designModel}
+LgsRgr.predict <- function(obsDf, ftr, cff, type = 'raw') {
+    if (!(type %in% c("prob")))
+		stop("LgsRgr.predict: type: ", type, " not supported yet")
+
+    # Take dot product of glbObsAllFtrMtrx and coefficients  
+    scores = cbind(1, as.matrix(obsDf[, ftr])) %*% as.matrix(cff)   
+    
+    # Compute P(y_i = +1 | x_i, w) using the link function
+    probabilities = 1.0 / (1.0 + exp(-scores))
+    
+    if (type == "prob")
+    return(as.vector(probabilities))
+}
+
+LgsRgr.getLogLikelihoodMean <- function(obsDf, ftr, rsp, matchClass, cff, 
+                                        l2Penalty = 0) {
+    if (l2Penalty != 0)
+        stop("LgsRgr.getLogLikelihoodMean: l2Penalty: ", l2Penalty, 
+             "not supported yet")
+    
+    indicator <- (obsDf[, rsp] == matchClass)
+    
+    scores <- cbind(1, as.matrix(obsDf[, ftr])) %*% as.matrix(cff)    
+    logexp <- log(1. + exp(-scores))
+    
+    # Simple check to prevent overflow
+    mask <- is.infinite(logexp)
+    logexp[mask] <- -scores[mask]
+    
+    lp <- sum((indicator-1)*scores - logexp)
+    return(lp/nrow(obsDf))
+}    
+    
+LgsRgr.getFeatureDerivative <- function(err, ftrVctr) {
+    # Compute the dot product of errors and feature
+    derivative <- matrix(err, nrow = 1) %*% matrix(ftrVctr, ncol = 1)
+    
+    return(as.vector(derivative))
+}
+
+dmyObs <- data.frame(list(ftr.1 = c(+2.0, -1.0), 
+                          ftr.2 = c(+3.0, -1.0),
+                          rsp   = c(-1,   +1)))
+dmyCff <- c(+1.0, +3.0, -1.0)
+dmyObsRawScr <- c(1.*1. + 2.*3.    + 3.*(-1.), 
+                  1.*1. + (-1.)*3. + (-1.)*(-1.))
+dmyObsRawPrdct <- 1./(1 + exp(-dmyObsRawScr))
+#correct_second_term = 
+dmyObsRawMeanLogLhood <- mean((((dmyObs[, "rsp"] == +1) - 1) * dmyObsRawScr) -
+                              (log(1. + exp(-dmyObsRawScr)))) 
+
+print('The following outputs must match ')
+print('------------------------------------------------')
+print('             Raw predictions:'); print(dmyObsRawPrdct)
+print('  LgsRgr.predict predictions:'); print(LgsRgr.predict(obsDf = dmyObs, 
+                                                             ftr = c("ftr.1", "ftr.2"),
+                                                             cff = dmyCff,
+                                                             type = "prob"))
+print('------------------------------------------------')
+print('             Raw mean log likelihood:'); print(dmyObsRawMeanLogLhood)
+print('         LgsRgr.getLogLikelihoodMean:'); print(LgsRgr.getLogLikelihoodMean(
+    obsDf = dmyObs, 
+    ftr = c("ftr.1", "ftr.2"),
+    rsp = "rsp",
+    matchClass = +1,
+    cff = dmyCff,
+    l2Penalty = 0))
+
+j <- 1             # Feature number
+i <- 10            # Obs number
+cff <- rep(0, 194) # # A point w at which we are computing the gradient.
+predictions <- LgsRgr.predict(obsDf = glbObsTrn[i, ], 
+                            ftr = grep("R.", names(glbObsTrn), fixed = TRUE, value = TRUE),
+                            cff = cff,
+                            type = "prob")
+indicator <- as.numeric(glbObsTrn[i, "sentiment.fctr"] == "P")
+errors <- indicator - predictions        
+gradient_single_data_point <- LgsRgr.getFeatureDerivative(err = errors, 
+            ftrVctr = glbObsTrn[i, grep("R.", names(glbObsTrn), fixed = TRUE, value = TRUE)[j]])
+print('------------------------------------------------')
+print(sprintf("Gradient single data point:%0.4f", gradient_single_data_point))
+print(        "          --> Should print:0.0000")
+
+```
+predictOutput <- function(obsDf, feats, weights) {
+    featMtrx <- cbind(matrix(rep(1.0, nrow(obsDf)), nrow = nrow(obsDf)),
+                      as.matrix(obsDf[, feats]))
+    #print(class(featMtrx))
+    return(featMtrx %*% weights)
+}
+
+print(predictOutput(glbObsTrn, 'sqft_living', c(1.0, 1.0))[1]) # should be 1181.0
+print(predictOutput(glbObsTrn, 'sqft_living', c(1.0, 1.0))[2]) # should be 2571.0
+
+print(predictOutput(glbObsTrn, 'sqft_living', c(10.0, 2.0))[1]) # should be 2370.0
+print(predictOutput(glbObsTrn, 'sqft_living', c(10.0, 2.0))[2]) # should be 5150.0
+
+ridgeRegressionLossFn <- function(obsDf, feats, weights, l2Penalty) {
+    loss <- sum((predictOutput(obsDf, feats, weights) - obsDf[, glb_rsp_var])
+                ^ 2) +
+                l2Penalty * sum(weights ^ 2)
+    if (is.infinite(loss)) {
+        print(sprintf(
+            "ridgeRegressionLossFn: loss == Inf; l2Penalty:%0.4e; weights:",
+            l2Penalty))
+        print(weights)
+    }
+    return(loss)
+}
+
+ridgeRegressionLossGradientFn <- function(obsDf, feats, weights, l2Penalty,
+                                          featIx, isIntercept) {
+#     print(sprintf(
+#         "ridgeRegressionLossGradientFn: nrow(obsDf):%d; l2Penalty:%0.4f; featIx:%d; isIntercept:%s",
+#                       nrow(obsDf), l2Penalty, featIx, isIntercept))
+#     print(sprintf(
+#         "ridgeRegressionLossGradientFn: weights:"))
+#     print(weights)
+
+    if (!isIntercept) {
+        featX <- as.matrix(obsDf[, feats[featIx-1]])
+    } else featX <- matrix(rep(1, nrow(obsDf)), nrow = nrow(obsDf))
+
+    gradient <- 2 *
+                sum((predictOutput(obsDf, feats, weights) -
+                     obsDf[, glb_rsp_var]) *
+                    featX)
+    if (!isIntercept)
+        gradient <- gradient + 2 * l2Penalty * weights[featIx]
+
+#     print(sprintf(
+#         "ridgeRegressionLossGradientFn: featIx:%d; gradient:%0.4e",
+#                   featIx, gradient))
+    return(gradient)
+}
+
+autoLossGradientFn <- function(obsDf, feats, weights, l2Penalty,
+                                    featIx, isIntercept, verbose = FALSE) {
+    if (any(is.nan(weights))) {
+        print("autoLossGradientFn: weights:")
+        print(weights)
+        stop("one or more weights are NaNs")
+    }
+
+    if (weights[featIx] != 0)
+        weightSearchSpace <- c(weights[featIx], 0.99 * weights[featIx], 1.01 * weights[featIx]) else
+        weightSearchSpace <- c(weights[featIx], -0.01                 , +0.01                 )
+    lossDf <- data.frame(weight = weightSearchSpace)
+
+    cmptLoss <- function(resDf) {
+        if (!('loss' %in% names(resDf)))
+            lossDf[, 'loss'] <- NA
+
+        lossDf[is.na(lossDf$loss), 'loss'] <-
+            sapply(lossDf[is.na(lossDf$loss), 'weight'], function(thsWeight)
+                                            ridgeRegressionLossFn(obsDf, feats,
+                                                                  c(head(weights, featIx - 1),
+                                                                    thsWeight,
+                                                                    tail(weights, -featIx)),
+                                                                  l2Penalty))
+        lossDf <- dplyr::arrange(lossDf, weight)
+        return(lossDf)
+    }
+
+    lossDf <- cmptLoss(lossDf)
+    thsWeightIx <- which(lossDf$weight == weights[featIx])
+    gradientAuto <- (lossDf[thsWeightIx + 1, 'loss']   - lossDf[thsWeightIx - 1, 'loss'  ]) /
+                    (lossDf[thsWeightIx + 1, 'weight'] - lossDf[thsWeightIx - 1, 'weight'])
+
+    if (verbose) {
+        if (weights[featIx] != 0)
+            weightSearchSpace <- c(weights[featIx], 0,
+                        seq(0.01 * weights[featIx], 100 * weights[featIx], length.out = 20)) else
+            weightSearchSpace <- c(weights[featIx],
+                        seq(-0.1, +0.1, length.out = 20))
+        weightSearchSpace <- setdiff(weightSearchSpace, lossDf$weight)
+        lossDf <- myrbind_df(lossDf, data.frame(weight = weightSearchSpace))
+        lossDf <- cmptLoss(lossDf)
+
+        gradientActual <- ridgeRegressionLossGradientFn(obsDf, feats, weights,
+                                                        l2Penalty, featIx, isIntercept)
+        print(sprintf('autoLossGradientFn: weights[%d]: %.4e; isIntercept: %s;',
+                     featIx, weights[featIx], isIntercept))
+        print(sprintf('  gradientActual: %.4e', gradientActual))
+        print(sprintf('  gradientAuto  : %.4e', gradientAuto  ))
+
+        print(ggplot(lossDf, aes(x = weight, y = loss)) +
+                  geom_point() +
+                  geom_line(color = 'blue') +
+                  geom_abline(slope = gradientActual,
+                              intercept = lossDf[which(lossDf$weight == 0), 'loss'],
+                              color = 'red') +
+                  geom_abline(slope = gradientAuto,
+                              intercept = lossDf[which(lossDf$weight == 0), 'loss'],
+                              color = 'green') +
+                  geom_point(x = weights[featIx],
+                             y = lossDf[which(lossDf$weight == weights[featIx]), 'loss'],
+                                 shape = 5, size = 4, color = 'black')
+              )
+    }
+
+    return(gradientAuto)
+}
+
+example_weights = c(1.0, 10.0)
+example_predictions = predictOutput(glbObsTrn, 'sqft_living', example_weights)
+example_errors = example_predictions - glbObsTrn[, glb_rsp_var]
+
+# next three lines should print the same values
+print(sum(example_errors * glbObsTrn[, 'sqft_living'])*2+20)
+# print(example_errors[1:5])
+# print(glbObsTrn[1:5, 'sqft_living'])
+# print((example_errors * glbObsTrn[, 'sqft_living'])[1:5])
+print(ridgeRegressionLossGradientFn(glbObsTrn, 'sqft_living',
+                                    example_weights,
+                                    l2Penalty = 1, featIx = 2, FALSE))
+print(autoLossGradientFn(obsDf = glbObsTrn,
+                         feats = 'sqft_living',
+                         weights = example_weights,
+                         l2Penalty = 1,
+                         featIx = 2,
+                         isIntercept = FALSE,
+                        verbose = TRUE))
+
+# next two lines should print the same values; third is approx
+print('')
+print(sum(example_errors)*2)
+#print(example_errors[1:5])
+print(ridgeRegressionLossGradientFn(glbObsTrn, 'sqft_living',
+                                    example_weights,
+                                    l2Penalty = 1, featIx = 1, TRUE))
+print(autoLossGradientFn(obsDf = glbObsTrn,
+                         feats = 'sqft_living',
+                         weights = example_weights,
+                         l2Penalty = 1,
+                         featIx = 1,
+                         isIntercept = TRUE,
+                         verbose = TRUE))
+
+optimizeGradientDescent <- function(obsDf, feats, weightsInitial,
+                                    stepSize, l2Penalty,
+                                    lossFn, lossGradientFn,
+                                    maxIterations = 100, verbose = FALSE,
+                                    maxLoss = 1e155) {
+
+    if (verbose) {
+        print(" ")
+        print(sprintf("optimzeGradientDescent:"))
+    }
+    weights <- weightsInitial
+    loss <- lossFn(obsDf, feats, weights, l2Penalty)
+
+    #while not reached maximum number of iterations:
+    iterResults = data.frame(iterNum = 1:maxIterations)
+    for (iterNum in 1:maxIterations) {
+        if (verbose &&
+            ((iterNum %% (maxIterations / 10) == 1) ||
+             (iterNum <= 10)))
+            print(sprintf("  iteration: %d; loss:%0.4e", iterNum, loss))
+
+        # loop over each weight
+        for (i in 1:length(weights)) {
+            # compute the derivative for weight[i].
+            #  when i=1, you are computing the derivative of the constant!
+            gradient <-
+                lossGradientFn(obsDf, feats, weights, l2Penalty,
+                               i, (i == 1))
+
+            # subtract the stepSize times the gradient from the
+            #   current weight
+            weights[i] = weights[i] - stepSize * gradient
+        }
+        if (any(is.nan(weights))) {
+            warning(sprintf(
+                "optimizeGradientDescent: weights: one or more elements are NaNs; iterNum: %d",
+                            iterNum))
+            break
+        }
+
+        loss <- lossFn(obsDf, feats, weights, l2Penalty)
+        iterResults[iterNum, "loss"] <- loss
+        for (featIx in 1:(length(feats) + 1)) {
+            if (featIx == 1)
+                iterResults[iterNum, '.intercept'] <- weights[featIx] else
+                iterResults[iterNum, feats[featIx - 1]] <- weights[featIx]
+        }
+
+        if (is.infinite(loss)) {
+            warning("optimizeGradientDescent: loss is Inf")
+            break
+        }
+    }
+
+    if ((sum(      is.na(iterResults$loss)) > 0) ||
+        (sum(is.infinite(iterResults$loss)) > 0))
+        converged <- FALSE else converged <- TRUE
+
+    # Display results at end of iterations
+    if (verbose || !converged) {
+        myprint_df(iterResults)
+
+        iterResultsIx <- ifelse(converged, nrow(iterResults),
+                                            which(      is.na(iterResults$loss) |
+                                                  is.infinite(iterResults$loss))[1] - 1)
+        if (max(iterResults[1:iterResultsIx, 'loss']) > maxLoss) # geom_contour does not work
+            iterResultsIx <- which(iterResults[1:iterResultsIx, 'loss'] > maxLoss)[1] - 1
+
+        print(sprintf('iterResultsIx:%d', iterResultsIx))
+        wgt1 <- iterResults[1:iterResultsIx, '.intercept']
+        wgt2 <- iterResults[1:iterResultsIx, feats[1]]
+        contourDf <- expand.grid(
+                wgt1 = union(rnorm(10,
+                                mean(wgt1, na.rm = TRUE),
+                                  sd(wgt1, na.rm = TRUE)),
+                        union(+1 * range(wgt1, na.rm = TRUE),
+                              +2 * range(wgt1, na.rm = TRUE))),
+                wgt2 = union(rnorm(10,
+                                mean(wgt2, na.rm = TRUE),
+                                  sd(wgt2, na.rm = TRUE)),
+                        union(+1 * range(wgt2, na.rm = TRUE),
+                              +2 * range(wgt2, na.rm = TRUE))))
+
+        contourDf[, 'fitLoss'] <-
+            sapply(1:nrow(contourDf), function(contourIx)
+                    lossFn(obsDf, feats, c(contourDf[contourIx, 'wgt1'],
+                                           contourDf[contourIx, 'wgt2'],
+                iterResults[iterResultsIx, 5:length(names(iterResults))]),
+                               l2Penalty))
+        #print(str(contourDf))
+        print(contourDf)
+        print(gp <- ggplot(contourDf, aes(x = wgt1, y = wgt2)) +
+                    geom_contour(aes(z = fitLoss, color = ..level..)) +
+                    geom_path(data = iterResults,
+                              aes_string(x = ".intercept", y = feats[1]),
+                              color = 'red', lineend = "square") +
+                    geom_point(data = iterResults,
+                                aes_string(x = '.intercept', y = feats[1]),
+                               color = 'black', shape = 4) +
+                    geom_point(data = iterResults[1,],
+                            aes_string(x = '.intercept', y = feats[1]),
+                            color = 'red', shape = 1, size = 5) +
+                    xlab('.intercept') + ylab(feats[1])
+              )
+
+        print(myplot_line(iterResults[1:iterResultsIx,], "iterNum", "loss"))
+    }
+    return(weights)
+}
+
+stepSize <- 1e-10; l2Penalty <- 1e+10; maxIterations = 100
+
+startTm <- proc.time()["elapsed"]
+weightsTst <-
+    optimizeGradientDescent(obsDf = glbObsFit, feats = glbFeats,
+                            weightsInitial = weightsZero,
+                            stepSize = stepSize,
+                            l2Penalty = l2Penalty,
+                            lossFn = ridgeRegressionLossFn,
+                            lossGradientFn = ridgeRegressionLossGradientFn,
+                            maxIterations = maxIterations,
+                            verbose = TRUE,
+                            maxLoss = 1e156)
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+              proc.time()["elapsed"] - startTm))
+print(sprintf('weightsTst:'))
+print(weightsTst)
+
+startTm <- proc.time()["elapsed"]
+weightsTst <-
+    optimizeGradientDescent(obsDf = glbObsFit, feats = glbFeats,
+                            weightsInitial = weightsZero,
+                            stepSize = stepSize,
+                            l2Penalty = l2Penalty,
+                            lossFn = ridgeRegressionLossFn,
+                            lossGradientFn = autoLossGradientFn,
+                            maxIterations = maxIterations,
+                            verbose = TRUE,
+                            maxLoss = 1e156)
+print(sprintf("optimizeGradientDescent(autoLossGradientFn): elapsed secs: %.0f",
+              proc.time()["elapsed"] - startTm))
+print(sprintf('weightsTst:'))
+print(weightsTst)
+
+stepSize <- 2e-11; l2Penalty <- 1e+10; maxIterations = 100
+
+startTm <- proc.time()["elapsed"]
+weightsTst <-
+    optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                            stepSize, l2Penalty,
+                    ridgeRegressionLossFn, ridgeRegressionLossGradientFn,
+                            maxIterations, verbose = TRUE,
+                           maxLoss = 1e155)
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
+print(sprintf('weightsTst:'))
+print(weightsTst)
+
+startTm <- proc.time()["elapsed"]
+weightsTst <-
+    optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                            stepSize, l2Penalty,
+                            ridgeRegressionLossFn, autoLossGradientFn,
+                            maxIterations, verbose = TRUE,
+                            maxLoss = 1e155)
+print(sprintf(
+    "optimizeGradientDescent(autoLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
+print(sprintf('weightsTst:'))
+print(weightsTst)
+
+stepSize <- 1e-12; l2Penalty <- 0.0; maxIterations = 100
+
+startTm <- proc.time()["elapsed"]
+weightsL2Zero <-
+    optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                            stepSize, l2Penalty,
+                    ridgeRegressionLossFn, ridgeRegressionLossGradientFn,
+                            maxIterations, verbose = TRUE)
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
+print(sprintf('weightsL2Zero:'))
+print(weightsL2Zero)
+
+startTm <- proc.time()["elapsed"]
+weightsL2Zero <-
+    optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                            stepSize, l2Penalty,
+                            ridgeRegressionLossFn, autoLossGradientFn,
+                            maxIterations, verbose = TRUE)
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
+print(sprintf('weightsL2Zero:'))
+print(weightsL2Zero)
+
+stepSize <- 1e-12; l2Penalty <- 1e10; maxIterations = 100
+
+startTm <- proc.time()["elapsed"]
+weightsL2Hgh <-
+    optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                            stepSize, l2Penalty,
+                    ridgeRegressionLossFn, ridgeRegressionLossGradientFn,
+                            maxIterations, verbose = TRUE)
+print(sprintf(
+    "optimizeGradientDescent(ridgeRegressionLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
+print(sprintf('weightsL2Hgh:'))
+print(weightsL2Hgh)
+
+startTm <- proc.time()["elapsed"]
+weightsL2Hgh <-
+    optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                            stepSize, l2Penalty,
+                            ridgeRegressionLossFn, autoLossGradientFn,
+                            maxIterations, verbose = TRUE)
+print(sprintf(
+    "optimizeGradientDescent(autoLossGradientFn): elapsed secs: %.0f",
+    proc.time()["elapsed"] - startTm))
+print(sprintf('weightsL2Hgh:'))
+print(weightsL2Hgh)
+
+# R sgd package test
+#
+set.seed(glbObsTrnPartitionSeed)
+sgdRes <- sgd(as.formula(paste(glb_rsp_var, " ~ ",
+                               paste0(glbFeats, collapse = " + "))),
+              glbObsFit, model = "glm")
+print(t(sgdRes$coefficients))
+
+set.seed(glbObsTrnPartitionSeed)
+sgdRes <- sgd(as.formula(paste(glb_rsp_var, " ~ ",
+                               paste0(glbFeats, collapse = " + "))),
+              glbObsFit, model = "glm",
+              model.control = list(loss = ridgeRegressionLossFn))
+print(t(sgdRes$coefficients))
+
+# Find best model parameters
+#
+getObsRSS <- function(obsDf, feats, weights) {
+    return(sum((obsDf[, glb_rsp_var] -
+                predictOutput(obsDf, feats, weights)) ^ 2))
+}
+
+if (file.exists(glbMdlDfFlnm))
+    load(glbMdlDfFlnm, verbose = TRUE) else
+    mdlDf <- data.frame()
+
+print(mdlDf)
+savMdlDf <- mdlDf
+
+gradientFnNmSrch <- c("ridgeRegressionLossGradientFn", "autoLossGradientFn")
+#maxIterationsSrch <- c(100, 200)
+maxIterationsSrch <- c(100)
+#stepSizeSrch <- c(1e-13, 1e-12, 1e-11, 2e-11)
+stepSizeSrch <- c(1e-11)
+#l2PenaltySrch <- c(0e+0, 1e+6, 1e+8, 1e+10, 1e+12)
+l2PenaltySrch <- c(0e+0)
+
+dimSrch <- list(l2Penalty     = l2PenaltySrch    ,
+                stepSize      = stepSizeSrch     ,
+                maxIterations = maxIterationsSrch,
+                gradientFnNm  = gradientFnNmSrch )
+dimDf <- do.call(expand.grid, dimSrch)
+resDf <- foreach(dimSrchIx = 1:nrow(dimDf), .combine = rbind) %do% {
+    isPresent <- FALSE
+    if ((nrow(mdlDf) > 0) &&
+        (nrow(thsDf <- merge(dimDf[dimSrchIx, ], mdlDf, by = names(dimSrch))) > 0)) {
+        thsRes <- NULL
+        isPresent <- TRUE
+    }
+
+    if (!isPresent) {
+        print("")
+        print(sprintf("Running optimizeGradientDescent for:"))
+        for (dim in names(dimSrch))
+            print(sprintf(ifelse(is.numeric(dimDf[, dim]), "  %*s:%0.4e", "  %*s:%s"),
+                          max(sapply(names(dimSrch), function(dimNm) nchar(dimNm))),
+                          dim, dimDf[dimSrchIx, dim]))
+        startTm <- proc.time()["elapsed"]
+        mdlWeights <-
+            optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
+                                    stepSize  = dimDf[dimSrchIx, 'stepSize' ],
+                                    l2Penalty = dimDf[dimSrchIx, 'l2Penalty'],
+                        ridgeRegressionLossFn,
+                        switch(as.character(dimDf[dimSrchIx, dim]),
+                               "ridgeRegressionLossGradientFn" = ridgeRegressionLossGradientFn,
+                                          "autoLossGradientFn" =            autoLossGradientFn,
+                               "default" = stop("unknown gradientFnNm")),
+                                    maxIterations = dimDf[dimSrchIx, 'maxIterations'],
+                                    verbose = FALSE)
+        print('  mdlWeights:')
+        print(mdlWeights)
+        thsRes <- dimDf[dimSrchIx, ]
+        thsRes['elapsedSecs'] <- proc.time()["elapsed"] - startTm
+        thsWeightsDf <- data.frame(matrix(c(mdlWeights,
+                                    getObsRSS(glbObsOOB, glbFeats, mdlWeights)),
+                                            nrow = 1))
+        names(thsWeightsDf) <- c('.intercept', glbFeats, 'OOBRSS')
+        thsRes <- cbind(thsRes, thsWeightsDf)
+        row.names(thsRes) <- do.call(paste, list(dimDf[dimSrchIx, ], collapse = "#"))
+    }
+
+    thsRes
+}
+
+print(resDf)
+
+mdlDf <- rbind(mdlDf, resDf)
+print(dplyr::arrange(mdlDf, desc(OOBRSS)))
+
+save(mdlDf, file = glbMdlDfFlnm)
+
+pltMdlDf <- mdlDf[    (mdlDf$OOBRSS <= 1e+273), ]
+print(mypltModelStats(df = pltMdlDf,
+                      measure = c("OOBRSS", "elapsedSecs"),
+                      dim = c("l2Penalty", "stepSize", "maxIterations", "gradientFnNm"),
+                      scaleXFn = c(l2Penalty = "log10"),
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS']),
+                      fileName = 'WAKCHouses_SGD_Test_r.png'))
+print(mypltModelStats(df = pltMdlDf,
+                      measure = c("elapsedSecs"),
+                      dim = c("l2Penalty", "stepSize", "maxIterations", "gradientFnNm"),
+                      scaleXFn = c(l2Penalty = "log10"),
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS']),
+                      fileName = NULL))
+
+pltMdlDf <- mdlDf[    (mdlDf$OOBRSS       <= 1e+273) &
+                      (mdlDf$gradientFnNm == "ridgeRegressionLossGradientFn")
+                  , ]
+print(mypltModelStats(df = pltMdlDf,
+                      measure = c("OOBRSS", "elapsedSecs"),
+                      dim = c("l2Penalty", "stepSize", "maxIterations"),
+                      scaleXFn = c(l2Penalty = "log10"),
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS'])))
+
+pltMdlDf <- mdlDf[    (mdlDf$OOBRSS        <= 1e+273) &
+                      (mdlDf$gradientFnNm == "ridgeRegressionLossGradientFn") &
+                      (mdlDf$maxIterations == 100   )
+                  , ]
+print(mypltModelStats(df = pltMdlDf,
+                      measure = c("OOBRSS", "elapsedSecs"),
+                      dim = c("l2Penalty", "stepSize"),
+                      scaleXFn = c(l2Penalty = "log10"),
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS'])))
+
+pltMdlDf <- mdlDf[  (mdlDf$OOBRSS        <= 1e+273) &
+                    (mdlDf$gradientFnNm == "ridgeRegressionLossGradientFn") &
+                    (mdlDf$maxIterations == 100   ) &
+                    (mdlDf$stepSize      == 1e-11 )
+                      , ]
+print(mypltModelStats(df = pltMdlDf,
+                      measure = c("OOBRSS", "elapsedSecs"),
+                      dim = c("l2Penalty"),
+                      scaleXFn = c(l2Penalty = "log10"),
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS'])))
+
+print(" ")
+print(sprintf("weightsZero:"))
+print(weightsZero)
+print(sprintf("  glbObsNew RSS: %.4e",
+              getObsRSS(glbObsNew, glbFeats, weightsZero)))
+
+print(" ")
+print(sprintf('weightsL2Zero:'))
+print(weightsL2Zero)
+print(sprintf('  glbObsNew RSS: %.4e',
+              getObsRSS(glbObsNew, glbFeats, weightsL2Zero)))
+
+print(sprintf("glbObsNew Obs 1 %s:%0.4f",
+              glb_rsp_var, glbObsNew[1, glb_rsp_var]))
+
+print(" ")
+print(sprintf("  weightsZero   %s prediction:%0.4f; error.abs:%0.4f",
+              glb_rsp_var,
+    prediction <- predictOutput(glbObsNew[1, ], glbFeats, weightsZero  ),
+              abs(prediction - glbObsNew[1, glb_rsp_var])))
+
+print(" ")
+print(sprintf("  weightsL2Zero %s prediction:%0.4f; error.abs:%0.4f",
+              glb_rsp_var,
+    prediction <- predictOutput(glbObsNew[1, ], glbFeats, weightsL2Zero),
+              abs(prediction - glbObsNew[1, glb_rsp_var])))
+
+print(sessionInfo())
+
+
+
+

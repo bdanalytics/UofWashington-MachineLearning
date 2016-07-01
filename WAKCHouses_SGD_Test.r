@@ -18,8 +18,8 @@ glbObsNewFile <- list(name = "kc_house_test_data.csv")
 glb_rsp_var_raw <- "price"
 glb_rsp_var <- glb_rsp_var_raw
 glbObsTrnPartitionSeed <- 123
-
 glbFeats <- c('sqft_living', 'sqft_living15')
+glbMdlDfFlnm <- "WAKCHouses_SGD_Test_r.RData"
 
 glbObsTrn <- myimport_data(specs = glbObsTrnFile, comment = "glbObsTrn",
                            force_header = TRUE)
@@ -39,8 +39,8 @@ glbObsOOB <- glbObsTrn[ split, ]
 glbObsFit <- glbObsTrn[!split, ]
 print(sprintf("glbObsFit:")); print(dim(glbObsFit))
 print(sprintf("glbObsOOB:")); print(dim(glbObsOOB))
-print(OOB_size)
-print(OOB_size * 1.0 / nrow(glbObsTrn))
+# print(OOB_size)
+# print(OOB_size * 1.0 / nrow(glbObsTrn))
 
 weightsZero <- rep(0, 1 + length(glbFeats))
 print(sprintf("weightsZero:"))
@@ -426,187 +426,140 @@ print(sprintf(
 print(sprintf('weightsL2Hgh:'))
 print(weightsL2Hgh)
 
+# R sgd package test
+#
+set.seed(glbObsTrnPartitionSeed)
+sgdRes <- sgd(as.formula(paste(glb_rsp_var, " ~ ",
+                               paste0(glbFeats, collapse = " + "))),
+              glbObsFit, model = "glm")
+print(t(sgdRes$coefficients))
+
+set.seed(glbObsTrnPartitionSeed)
+sgdRes <- sgd(as.formula(paste(glb_rsp_var, " ~ ",
+                               paste0(glbFeats, collapse = " + "))),
+              glbObsFit, model = "glm",
+              model.control = list(loss = ridgeRegressionLossFn))
+print(t(sgdRes$coefficients))
+
+# Find best model parameters
+#
 getObsRSS <- function(obsDf, feats, weights) {
     return(sum((obsDf[, glb_rsp_var] -
                 predictOutput(obsDf, feats, weights)) ^ 2))
 }
 
-mdlDfFlnm <- "WAKCHouses_SGD_Test.RData"
-if (file.exists(mdlDfFlnm))
-    load(mdlDfFlnm, verbose = TRUE) else
+if (file.exists(glbMdlDfFlnm))
+    load(glbMdlDfFlnm, verbose = TRUE) else
     mdlDf <- data.frame()
 
 print(mdlDf)
 savMdlDf <- mdlDf
 
+gradientFnNmSrch <- c("ridgeRegressionLossGradientFn", "autoLossGradientFn")
+#maxIterationsSrch <- c(100, 200)
 maxIterationsSrch <- c(100)
 #stepSizeSrch <- c(1e-13, 1e-12, 1e-11, 2e-11)
-stepSizeSrch <- c(1e-13, 1e-12)
-l2PenaltySrch <- c(0e+0, 1e+6, 1e+8, 1e+10, 1e+12)
-#l2PenaltySrch <- c(0e+0)
+stepSizeSrch <- c(1e-11)
+#l2PenaltySrch <- c(0e+0, 1e+6, 1e+8, 1e+10, 1e+12)
+l2PenaltySrch <- c(0e+0)
 
-dimSrch <- c(l2PenaltySrch)
-resDf <- foreach(l2PenaltyThs = l2PenaltySearch, .combine = rbind) %do% {
+dimSrch <- list(l2Penalty     = l2PenaltySrch    ,
+                stepSize      = stepSizeSrch     ,
+                maxIterations = maxIterationsSrch,
+                gradientFnNm  = gradientFnNmSrch )
+dimDf <- do.call(expand.grid, dimSrch)
+resDf <- foreach(dimSrchIx = 1:nrow(dimDf), .combine = rbind) %do% {
     isPresent <- FALSE
     if ((nrow(mdlDf) > 0) &&
-        (nrow(thsDf <- subset(mdlDf, l2Penalty == l2PenaltyThs)) > 0)) {
+        (nrow(thsDf <- merge(dimDf[dimSrchIx, ], mdlDf, by = names(dimSrch))) > 0)) {
         thsRes <- NULL
         isPresent <- TRUE
     }
 
     if (!isPresent) {
         print("")
-        print(sprintf(
-            "Running optimizeGradientDescent for l2Penalty:%0.4e",
-            l2PenaltyThs))
+        print(sprintf("Running optimizeGradientDescent for:"))
+        for (dim in names(dimSrch))
+            print(sprintf(ifelse(is.numeric(dimDf[, dim]), "  %*s:%0.4e", "  %*s:%s"),
+                          max(sapply(names(dimSrch), function(dimNm) nchar(dimNm))),
+                          dim, dimDf[dimSrchIx, dim]))
         startTm <- proc.time()["elapsed"]
         mdlWeights <-
             optimizeGradientDescent(glbObsFit, glbFeats, weightsZero,
-                                    stepSizeSearch,
-                                    l2PenaltyThs,
-                        ridgeRegressionLossFn, ridgeRegressionLossGradientFn,
-                                    maxIterationsSearch, verbose = FALSE)
+                                    stepSize  = dimDf[dimSrchIx, 'stepSize' ],
+                                    l2Penalty = dimDf[dimSrchIx, 'l2Penalty'],
+                        ridgeRegressionLossFn,
+                        switch(as.character(dimDf[dimSrchIx, dim]),
+                               "ridgeRegressionLossGradientFn" = ridgeRegressionLossGradientFn,
+                                          "autoLossGradientFn" =            autoLossGradientFn,
+                               "default" = stop("unknown gradientFnNm")),
+                                    maxIterations = dimDf[dimSrchIx, 'maxIterations'],
+                                    verbose = FALSE)
         print('  mdlWeights:')
         print(mdlWeights)
-        thsRes <- data.frame(l2Penalty = l2PenaltyThs,
-                             elapsedSecs = proc.time()["elapsed"] - startTm)
+        thsRes <- dimDf[dimSrchIx, ]
+        thsRes['elapsedSecs'] <- proc.time()["elapsed"] - startTm
         thsWeightsDf <- data.frame(matrix(c(mdlWeights,
                                     getObsRSS(glbObsOOB, glbFeats, mdlWeights)),
                                             nrow = 1))
         names(thsWeightsDf) <- c('.intercept', glbFeats, 'OOBRSS')
         thsRes <- cbind(thsRes, thsWeightsDf)
-        row.names(thsRes) <- paste(l2PenaltyThs)
+        row.names(thsRes) <- do.call(paste, list(dimDf[dimSrchIx, ], collapse = "#"))
     }
 
     thsRes
 }
+
+print(resDf)
+
 mdlDf <- rbind(mdlDf, resDf)
 print(dplyr::arrange(mdlDf, desc(OOBRSS)))
 
-save(mdlDf, file = mdlDfFlnm)
+save(mdlDf, file = glbMdlDfFlnm)
 
-mypltModelStats <- function(df, measure, dim = NULL, scaleXFn = NULL, highLightIx = NULL,
-                            title = NULL) {
-    if (is.null(dim))
-        dim <- setdiff(names(df), measure)
+pltMdlDf <- mdlDf[    (mdlDf$OOBRSS <= 1e+273), ]
+print(mypltModelStats(df = pltMdlDf,
+                      measure = c("OOBRSS", "elapsedSecs"),
+                      dim = c("l2Penalty", "stepSize", "maxIterations", "gradientFnNm"),
+                      scaleXFn = c(l2Penalty = "log10"),
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS']),
+                      fileName = 'WAKCHouses_SGD_Test_r.png'))
+print(mypltModelStats(df = pltMdlDf,
+                      measure = c("elapsedSecs"),
+                      dim = c("l2Penalty", "stepSize", "maxIterations", "gradientFnNm"),
+                      scaleXFn = c(l2Penalty = "log10"),
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS']),
+                      fileName = NULL))
 
-    df <- df[, c(measure, dim)]
+pltMdlDf <- mdlDf[    (mdlDf$OOBRSS       <= 1e+273) &
+                      (mdlDf$gradientFnNm == "ridgeRegressionLossGradientFn")
+                  , ]
+print(mypltModelStats(df = pltMdlDf,
+                      measure = c("OOBRSS", "elapsedSecs"),
+                      dim = c("l2Penalty", "stepSize", "maxIterations"),
+                      scaleXFn = c(l2Penalty = "log10"),
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS'])))
 
-    pltLst <- list(); pltIx <- 1
+pltMdlDf <- mdlDf[    (mdlDf$OOBRSS        <= 1e+273) &
+                      (mdlDf$gradientFnNm == "ridgeRegressionLossGradientFn") &
+                      (mdlDf$maxIterations == 100   )
+                  , ]
+print(mypltModelStats(df = pltMdlDf,
+                      measure = c("OOBRSS", "elapsedSecs"),
+                      dim = c("l2Penalty", "stepSize"),
+                      scaleXFn = c(l2Penalty = "log10"),
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS'])))
 
-    for (key in measure) {
-        # Print non-facet dims for debugging only ?
-        # print("nSteps: ")
-        # print(sort(unique(df$nSteps)))
-
-        #         for (num_steps in sort(unique(df$num_steps)))
-        #             for (learnDecayRate in sort(unique(df$learnDecayRate)))
-        #                 for (kpRELUs in sort(unique(df$kpRELUs))) {
-        pltDf <- tidyr::gather_(df[
-            #                                    (df$num_steps      == num_steps     ) &
-            #                                    (df$learnDecayRate == learnDecayRate) &
-            #                                    (df$kpRELUs        == kpRELUs       )
-                                , c(key, dim)], 'key', 'value', gather_cols = key)
-        if (!is.null(highLightIx))
-            bstDf <- tidyr::gather_(df[highLightIx, c(key, dim)], 'key', 'value',
-                                    gather_cols = key)
-
-        #print(nrow(pltDf))
-        if (nrow(pltDf) > 0) {
-            #print(pltDf)
-            gp <- ggplot(pltDf,
-                         aes_string(x = dim[1], y = 'value'
-                                    # group for lines
-                                    #, group = 'nRELUs'
-                         ))
-
-            if (length(dim) > 1)
-                #geom_line(aes(color = as.factor(nRELUs))) +
-                gp <- gp + geom_line(aes_string(color = dim[2])) else
-                gp <- gp + geom_line(color = 'blue')
-
-            if (!is.null(scaleXFn) &&
-                !is.null(scaleXFn[dim[1]])) {
-                gp <- gp + switch(scaleXFn[dim[1]],
-                                  log10 = scale_x_log10(),
-                                  stop("switch error in mypltModelStats"))
-
-                if (scaleXFn[dim[1]] == "log10") {
-                    #print("scaleXFn is log10")
-                    if (0 %in% unique(df[, dim[1]]))
-                        # hline if x-axis has log scale & x = 0 value needs to be highlighted
-                        if (length(dim) > 1)
-                            gp <- gp +
-                                geom_hline(data = pltDf[(pltDf[, dim[1]] == 0  ) &
-                                                        (pltDf[, 'key' ] == key) , ],
-                                            aes_string(yintercept = "value",  color = dim[2]),
-                                            linetype = 'dashed') else
-                            gp <- gp +
-                                geom_hline(data = pltDf[(pltDf[, dim[1]] == 0  ) &
-                                                        (pltDf[, 'key' ] == key) , ],
-                                            aes(yintercept = value), color = 'blue',
-                                            linetype = 'dashed')
-                }
-            }
-
-            gp <- gp +
-                ylab('') +
-                scale_linetype_identity(guide = "legend") +
-                #guides(linetype = "legend") +
-                #facet_grid('key ~ .', labeller = label_both, scales = 'free_y') +
-                #facet_grid('key ~ l2Penalty3', labeller = label_both, scales = 'free_y') +
-                theme(legend.position = "bottom")
-
-            if (!is.null(title))
-                gp <- gp + ggtitle(sprintf('%s: %s', title, key)) else
-                gp <- gp + ggtitle(sprintf(': %s',          key))
-            #                         pltLst[[paste(as.character(num_steps),
-            #                                       as.character(learnDecayRate),
-            #                                       as.character(kpRELUs),
-            #                                       sep = '#')]] <- gp
-
-            if (!is.null(highLightIx)) {
-                gp <- gp + geom_point(data = bstDf[(bstDf$key == key), ],
-                           shape = 5, color = 'black', size = 3)
-            }
-
-            pltLst[[pltIx]] <- gp; pltIx <- pltIx + 1
-        }
-    }
-
-    # png(filename = '4_convolutions_mdlNSteps.png',
-    #     width = 480 * 1, height = 480 * 1)
-    return(mypltMultiple(plotlist = pltLst, cols = length(measure)))
-    # dev.off()
-}
-
-# print(mypltModelStats(df = mdlDf,
-#                       measure = c("OOBRSS"),
-#                       dim = c("l2Penalty"),
-#                       highLightIx = which.min(mdlDf$OOBRSS),
-#                       title = NULL))
-print(mypltModelStats(df = mdlDf,
+pltMdlDf <- mdlDf[  (mdlDf$OOBRSS        <= 1e+273) &
+                    (mdlDf$gradientFnNm == "ridgeRegressionLossGradientFn") &
+                    (mdlDf$maxIterations == 100   ) &
+                    (mdlDf$stepSize      == 1e-11 )
+                      , ]
+print(mypltModelStats(df = pltMdlDf,
                       measure = c("OOBRSS", "elapsedSecs"),
                       dim = c("l2Penalty"),
                       scaleXFn = c(l2Penalty = "log10"),
-                      highLightIx = which.min(mdlDf$OOBRSS)))
-
-print(ggplot(mdlDf, aes(x = l2Penalty, y = OOBRSS, group = stepSize)) +
-      geom_line(aes(color = as.factor(stepSize))) +
-      scale_x_log10() +
-      geom_point(data = mdlDf[which.min(mdlDf$OOBRSS), ],
-                 shape = 5, color = 'black', size = 2))
-
-#pltMdlDf <- subset(mdlDf, OOBRSS < 1e+41)
-pltMdlDf <- mdlDf
-print(ggplot(pltMdlDf, aes(x = l2Penalty, y = OOBRSS, group = stepSize)) +
-      geom_line(aes(color = as.factor(stepSize))) +
-      scale_x_log10() +
-      geom_point(data = mdlDf[which.min(mdlDf$OOBRSS), ],
-                 shape = 5, color = 'black', size = 2) +
-      scale_y_log10() +
-      ylim(c(NA, 1e+15))
-     )
+                      highLightIx = which.min(pltMdlDf[, 'OOBRSS'])))
 
 print(" ")
 print(sprintf("weightsZero:"))

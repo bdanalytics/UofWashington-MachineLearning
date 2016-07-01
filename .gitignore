@@ -56,3 +56,12 @@ docs/_build/
 # PyBuilder
 target/
 .Rproj.user
+
+# my adds
+.RData
+.Rhistory
+*.Rproj
+.ipynb_checkpoints
+*.csv
+*.zip
+*.RData
